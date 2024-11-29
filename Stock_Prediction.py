@@ -1,12 +1,15 @@
 import numpy as np
 import pandas as pd
 from sklearn.feature_extraction.text import TfidfVectorizer
-from sklearn.model_selection import train_test_split, GridSearchCV
+from sklearn.model_selection import train_test_split
 from sklearn.metrics import accuracy_score, classification_report
+from sklearn.neural_network import MLPClassifier
 from textblob import TextBlob
-import xgboost as xgb
 import logging
 import sys
+from sklearn.preprocessing import StandardScaler
+from scipy.sparse import hstack
+from scipy.sparse import csr_matrix
 
 # Set up logging
 logging.basicConfig(level=logging.INFO)
@@ -14,7 +17,7 @@ logger = logging.getLogger(__name__)
 
 # Load news data
 logger.info("Loading news data...")
-news_data = pd.read_csv("abcnews-date-text.csv", names=['date', 'headline_text'])
+news_data = pd.read_csv("5%_abcnews-date-text.csv", names=['date', 'headline_text'])
 
 # Convert date column to datetime
 logger.info("Converting date column to datetime...")
@@ -112,47 +115,41 @@ X_sentiment = grouped_headlines.loc[valid_indices, 'sentiment']
 y = y[valid_indices]
 
 # Vectorize the headlines
-logger.info("Vectorizing headlines...")
-vectorizer = TfidfVectorizer(stop_words='english')
+logger.info("Vectorizing headlines with n-grams...")
+vectorizer = TfidfVectorizer(stop_words='english', ngram_range=(1, 2))
 X_tfidf = vectorizer.fit_transform(X_text)
 
 # Combine TF-IDF features with sentiment
 logger.info("Combining TF-IDF features with sentiment...")
-X = np.hstack((X_tfidf.toarray(), X_sentiment.values.reshape(-1, 1)))
+sentiment_sparse = csr_matrix(X_sentiment.values.reshape(-1, 1))
+X_combined = hstack([X_tfidf, sentiment_sparse])
 
 # Split the data into training and testing sets
 logger.info("Splitting data into training and testing sets...")
-X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+X_train, X_test, y_train, y_test = train_test_split(X_combined, y, test_size=0.2, random_state=42)
 
-# Define the parameter grid for Grid Search
-param_grid = {
-    'n_estimators': [50, 100, 200],
-    'max_depth': [3, 4, 5],
-    'learning_rate': [0.01, 0.1, 0.2],
-    'subsample': [0.8, 1.0]
-}
+logger.info("Scaling features...")
+scaler = StandardScaler(with_mean=False)
+X_train_scaled = scaler.fit_transform(X_train)
+X_test_scaled = scaler.transform(X_test)
 
-# Initialize the XGBoost model
-logger.info("Initializing XGBoost model...")
-xgb_model = xgb.XGBClassifier(random_state=42, eval_metric='mlogloss')
+# Initialize the MLPClassifier model
+logger.info("Initializing MLPClassifier model...")
+mlp_model = MLPClassifier(
+    random_state=42,
+    max_iter=1000,
+    hidden_layer_sizes=(128, 64),
+    activation='tanh',
+    learning_rate_init=0.001
+)
 
-# Initialize Grid Search
-logger.info("Initializing Grid Search...")
-grid_search = GridSearchCV(estimator=xgb_model, param_grid=param_grid, cv=3, scoring='accuracy', verbose=2, n_jobs=-1)
+# Fit the model to the training data
+logger.info("Training the MLPClassifier with scaled features...")
+mlp_model.fit(X_train_scaled, y_train)
 
-# Fit Grid Search to the training data
-logger.info("Fitting Grid Search to the training data...")
-sys.stdout.flush()  # Ensure all previous logs are printed
-grid_search.fit(X_train, y_train)
-
-# Print the best parameters and the best score
-logger.info("Best parameters found: %s", grid_search.best_params_)
-logger.info("Best accuracy score: %s", grid_search.best_score_)
-
-# Use the best estimator to make predictions on the test set
-logger.info("Making predictions on the test set...")
-best_model = grid_search.best_estimator_
-y_pred = best_model.predict(X_test)
+# Make predictions and evaluate the model
+logger.info("Making predictions on the scaled test set...")
+y_pred = mlp_model.predict(X_test_scaled)
 
 # Reverse the label mapping for predictions
 reverse_label_mapping = {v: k for k, v in label_mapping.items()}
@@ -168,8 +165,9 @@ print(classification_report(y_test_original, y_pred_original))
 def predict_stock_movement(headlines):
     sentiment = get_sentiment(headlines)
     headlines_vectorized = vectorizer.transform([headlines])
-    features = np.hstack((headlines_vectorized.toarray(), np.array([[sentiment]])))
-    prediction = best_model.predict(features)
+    features = hstack([headlines_vectorized, csr_matrix(np.array([[sentiment]]))])
+    features_scaled = scaler.transform(features)
+    prediction = mlp_model.predict(features_scaled)
     original_prediction = reverse_label_mapping[prediction[0]]
     print(f"Prediction: {original_prediction}")
     if original_prediction == 1:
